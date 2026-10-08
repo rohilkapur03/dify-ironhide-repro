@@ -133,8 +133,9 @@ def agent(prompt: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]
         "actions": [
             {
                 "turn": _turn_number(prompt),
-                "action": "respond",
+                "action": "comply",
                 "response": answer,
+                "parsed": False,
             }
         ],
         "tool_calls": [],
