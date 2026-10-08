@@ -1,0 +1,61 @@
+# Set IRONHIDE_CLI_SHA256 from the approved v2.4.1 release digest.
+name: Ironhide
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    name: ironhide/referee
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: .ironhide
+          key: ironhide-baseline-main-${{ github.run_id }}
+          restore-keys: |
+            ironhide-baseline-main-
+      - uses: ironhide-ai/ironhide-scan@v2.4.1
+        env:
+          DIFY_API_URL: ${{ vars.DIFY_API_URL }}
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+        with:
+          api_key: ${{ secrets.IRONHIDE_API_KEY }}
+          agent_id: agt_71bd63
+          adapter: ironhide_dify_adapter:agent
+          cli_sha256: ${{ vars.IRONHIDE_CLI_SHA256 }}
+          advisory_mode: "false"
+          block_on: critical,high
+
+  monitor:
+    name: ironhide/monitor
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .ironhide
+          key: ironhide-baseline-main-${{ github.run_id }}
+          restore-keys: |
+            ironhide-baseline-main-
+      - uses: ironhide-ai/ironhide-scan@v2.4.1
+        env:
+          DIFY_API_URL: ${{ vars.DIFY_API_URL }}
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+        with:
+          api_key: ${{ secrets.IRONHIDE_API_KEY }}
+          agent_id: agt_71bd63
+          adapter: ironhide_dify_adapter:agent
+          cli_sha256: ${{ vars.IRONHIDE_CLI_SHA256 }}
+          advisory_mode: "true"
+          comment: "false"
