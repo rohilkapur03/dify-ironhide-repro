@@ -17,6 +17,10 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "openai==2.28.0"
       - uses: actions/cache/restore@v4
         with:
           path: .ironhide
@@ -25,12 +29,12 @@ jobs:
             ironhide-baseline-main-
       - uses: ironhide-ai/ironhide-scan@v2.4.1
         env:
-          DIFY_API_URL: ${{ vars.DIFY_API_URL }}
-          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini-2025-04-14
         with:
           api_key: ${{ secrets.IRONHIDE_API_KEY }}
           agent_id: agt_71bd63
-          adapter: ironhide_dify_adapter:agent
+          adapter: ironhide_openai_adapter:agent
           cli_sha256: ${{ vars.IRONHIDE_CLI_SHA256 }}
           advisory_mode: "false"
           block_on: critical,high
@@ -44,6 +48,10 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "openai==2.28.0"
       - uses: actions/cache@v4
         with:
           path: .ironhide
@@ -52,12 +60,12 @@ jobs:
             ironhide-baseline-main-
       - uses: ironhide-ai/ironhide-scan@v2.4.1
         env:
-          DIFY_API_URL: ${{ vars.DIFY_API_URL }}
-          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini-2025-04-14
         with:
           api_key: ${{ secrets.IRONHIDE_API_KEY }}
           agent_id: agt_71bd63
-          adapter: ironhide_dify_adapter:agent
+          adapter: ironhide_openai_adapter:agent
           cli_sha256: ${{ vars.IRONHIDE_CLI_SHA256 }}
           advisory_mode: "true"
           comment: "false"
