@@ -162,8 +162,31 @@ def _adversarial(prompt: dict[str, Any], tools: list[dict[str, Any]]) -> dict[st
     return {"actions": [action], "tool_calls": calls}
 
 
+def _adversarial_conversation(prompt: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    """Observe every Tier B turn using only the script prefix available then."""
+    episode = prompt.get("episode") or {}
+    script = episode.get("script")
+    if not isinstance(script, list) or any(
+        not isinstance(item, dict) or type(item.get("turn")) is not int for item in script
+    ):
+        raise ValueError("Tier B requires a numbered script with integer turn labels")
+    if len({item["turn"] for item in script}) != len(script):
+        raise ValueError("Tier B requires unique integer turn labels")
+
+    actions: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
+    for index in range(len(script)):
+        turn_prompt = {**prompt, "episode": {**episode, "script": script[: index + 1]}}
+        result = _adversarial(turn_prompt, tools)
+        actions.extend(result["actions"])
+        calls.extend(result["tool_calls"])
+    return {"actions": actions, "tool_calls": calls}
+
+
 def agent(prompt: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
     """Drive one Ironhide contract-v2 episode round with the OpenAI agent."""
     if prompt.get("episode_type") == "behavioral" or prompt.get("tier") == "A":
         return _behavioral(prompt)
+    if prompt.get("tier") == "B":
+        return _adversarial_conversation(prompt, tools)
     return _adversarial(prompt, tools)
