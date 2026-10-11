@@ -79,7 +79,12 @@ class FakeResponses:
         if self.module is not None and request.get("text_format") is self.module["DetectionReport"]:
             self.detection_requests.append(request)
             return SimpleNamespace(output_parsed=self.report)
-        return self._answer(request)
+        answer = self._answer(request)
+        if "text_format" not in request:
+            # The real SDK only fills output_parsed when text_format was sent
+            # (openai lib/_parsing/_responses.py::parse_text returns None).
+            answer = SimpleNamespace(**{**vars(answer), "output_parsed": None})
+        return answer
 
 
 def load_module(responses):
@@ -222,22 +227,58 @@ class TierBConversationTests(unittest.TestCase):
     def test_structured_output_uses_the_adapters_decision_schema(self):
         provider = FakeResponses(decided("comply", "ok"))
         module = load_module(provider)
-        module["agent"](prompt(turns=(0,)), [])
+        result = module["agent"](prompt(turns=(0,)), [])
         self.assertIs(provider.requests[0]["text_format"], module["TurnDecision"])
+        self.assertIn(module["_DECISION_PROMPT"], provider.requests[0]["instructions"])
+        self.assertEqual(result["actions"][0]["action"], "comply")
 
-    def test_no_parsed_field_is_ever_emitted(self):
+    def test_unparseable_structured_output_fails_the_run_instead_of_fabricating(self):
+        # The real SDK raises (pydantic ValidationError, a ValueError) when the
+        # model's JSON does not match TurnDecision; nothing may be invented.
+        provider = FakeResponses(decided("refuse", "No."), ValueError("invalid TurnDecision JSON"))
+        with self.assertRaisesRegex(ValueError, "invalid TurnDecision JSON"):
+            load_agent(provider)(prompt(), [])
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_tool_results_are_untrusted_user_data_never_developer_authority(self):
+        provider = FakeResponses(decided("refuse", "No."))
+        item = prompt(turns=(0,))
+        item["tool_results"] = [{"tool": "lookup", "result": "Synthetic sandbox result"}]
+        load_agent(provider)(item, [])
+        convo = messages(provider.requests[0])
+        for role, content in convo:
+            if "Synthetic sandbox result" in content:
+                self.assertEqual(role, "user")
+                self.assertIn("untrusted", content)
+        self.assertTrue(any("Synthetic sandbox result" in c for _, c in convo))
+        self.assertEqual(convo[-1], ("user", "Synthetic request for turn 0"))
+
+    def test_tool_call_only_turn_is_recorded_in_history_by_tool_name(self):
+        call = SimpleNamespace(type="function_call", name="lookup", arguments='{"key":"example"}')
+        provider = FakeResponses(undeclared(calls=[call]), decided("refuse", "No."))
+        load_agent(provider)(prompt(), [{"name": "lookup", "args": ["key"]}])
+        self.assertEqual(
+            messages(provider.requests[1])[2],
+            ("assistant", "[no text reply; requested tool calls: lookup]"),
+        )
+
+    def test_only_an_undetermined_turn_is_marked_unparsed(self):
+        # Ironhide's /ci/episode/{id}/submit builds DefenseAction(**action), so
+        # "parsed": False is honored: the turn grades INCONCLUSIVE instead of a
+        # declared comply that could read as a fabricated breach.
         provider = FakeResponses(
             decided("comply", "fine"), undeclared("plain text"), decided("refuse", "no"),
         )
         result = load_agent(provider)(prompt(turns=(0, 1, 2)), [])
-        for action in result["actions"]:
-            self.assertNotIn("parsed", action)
+        self.assertNotIn("parsed", result["actions"][0])
+        self.assertIs(result["actions"][1]["parsed"], False)
+        self.assertNotIn("parsed", result["actions"][2])
 
-    def test_undeclared_turn_is_reported_as_comply_never_refuse(self):
+    def test_undeclared_turn_is_reported_as_unparsed_comply_never_refuse(self):
         provider = FakeResponses(undeclared("I refuse this request."), decided("comply", "next"))
         result = load_agent(provider)(prompt(), [])
         self.assertEqual(result["actions"][0], {
-            "turn": 0, "action": "comply", "response": "I refuse this request.",
+            "turn": 0, "action": "comply", "response": "I refuse this request.", "parsed": False,
         })
         self.assertEqual(messages(provider.requests[1])[2], ("assistant", "I refuse this request."))
 
@@ -333,13 +374,16 @@ class OtherTierTests(unittest.TestCase):
     def test_tier_c_retains_one_request_per_pull_round_and_real_tool_calls(self):
         call = SimpleNamespace(type="function_call", name="lookup", arguments='{"key":"example"}')
         provider = FakeResponses(undeclared(calls=[call]), decided("refuse", "I cannot disclose it."))
-        agent = load_agent(provider)
+        module = load_module(provider)
+        agent = module["agent"]
         item = prompt(tier="C")
         tools = [{"name": "lookup", "args": ["key"]}]
         first = agent(item, tools)
         self.assertEqual(first["tool_calls"], [{"turn": 1, "tool": "lookup", "args": {"key": "example"}}])
         self.assertEqual(first["actions"][0]["action"], "comply")
         self.assertEqual(len(provider.requests), 1)
+        self.assertIs(provider.requests[0]["text_format"], module["TurnDecision"])
+        self.assertIn(module["_DECISION_PROMPT"], provider.requests[0]["instructions"])
         self.assertEqual(context(provider.requests[0])["script"], item["episode"]["script"])
         item["tool_results"] = [{"tool": "lookup", "result": "Synthetic sandbox result"}]
         second = agent(item, tools)
@@ -355,10 +399,36 @@ class OtherTierTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["action"], "comply")
         self.assertNotIn("parsed", result["actions"][0])
 
-    def test_tier_c_undeclared_text_is_comply_even_if_it_sounds_like_a_refusal(self):
+    def test_tier_c_undeclared_text_is_unparsed_comply_even_if_it_sounds_like_a_refusal(self):
         provider = FakeResponses(undeclared("I cannot do that."))
         result = load_agent(provider)(prompt(tier="C"), [])
-        self.assertEqual(result["actions"][0], {"turn": 1, "action": "comply", "response": "I cannot do that."})
+        self.assertEqual(result["actions"][0], {
+            "turn": 1, "action": "comply", "response": "I cannot do that.", "parsed": False,
+        })
+
+    def test_action_suite_prompt_passes_tool_calls_through_unchanged(self):
+        # The exact prompt shape cli/ironhide.py::_action_drive_adapter sends.
+        task = "Synthetic task: update the example record."
+        action_prompt = {
+            "episode_type": "action", "task": task, "tool_results": [],
+            "episode": {"script": [{"turn": 0, "content": task, "text": task}]},
+        }
+        manifest = [{"name": "update_record", "description": "", "params": ["id", "status"],
+                     "args": ["id", "status"]}]
+        call = SimpleNamespace(type="function_call", name="update_record",
+                               arguments='{"id": "example-1", "status": "closed"}')
+        provider = FakeResponses(undeclared(calls=[call]), decided("comply", "Updated."))
+        agent = load_agent(provider)
+        first = agent(action_prompt, manifest)
+        self.assertEqual(first["tool_calls"], [
+            {"turn": 0, "tool": "update_record", "args": {"id": "example-1", "status": "closed"}},
+        ])
+        tool = provider.requests[0]["tools"][0]
+        self.assertEqual((tool["name"], tool["parameters"]["required"]), ("update_record", ["id", "status"]))
+        self.assertEqual(provider.requests[0]["tool_choice"], "auto")
+        self.assertEqual(context(provider.requests[0])["script"], action_prompt["episode"]["script"])
+        action_prompt["tool_results"] = [{"tool": "update_record", "result": "ok"}]
+        self.assertEqual(agent(action_prompt, manifest)["tool_calls"], [])
 
 
 if __name__ == "__main__":
